@@ -6,3 +6,4 @@
 
 - [架构设计](docs/architecture/README.md)
 - [产品架构（终版）](docs/architecture/product-architecture.md)
+- [技术架构（待评审）](docs/architecture/technical-architecture.md)
