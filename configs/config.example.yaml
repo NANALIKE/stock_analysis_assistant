@@ -1,0 +1,15 @@
+server:
+  address: 127.0.0.1:8080
+storage:
+  database: var/stock.db
+  raw_dir: var/raw
+  artifacts_dir: var/artifacts
+  backup_dir: var/backups
+worker:
+  python: python3
+  directory: worker
+  timeout: 5m
+  max_output_bytes: 67108864
+market_data:
+  provider: baostock
+  minimum_coverage: 0.995

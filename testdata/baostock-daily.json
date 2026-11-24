@@ -1,0 +1,24 @@
+{
+  "source_url": "https://www.baostock.com/mainContent?file=pythonAPI.md#query_daily_history_k_AStock",
+  "description": "Fixed row from the official API documentation, not an online provider admission sample.",
+  "record": {
+    "date": "2026-02-05",
+    "code": "sh.600648",
+    "open": "10.7000",
+    "high": "10.7800",
+    "low": "10.6400",
+    "close": "10.7400",
+    "preclose": "10.6800",
+    "volume": "4465487",
+    "amount": "47925519.1900",
+    "adjustflag": "3",
+    "turn": "0.392500",
+    "tradestatus": "1",
+    "pctChg": "0.561800",
+    "peTTM": "21.493688",
+    "pbMRQ": "0.962863",
+    "psTTM": "2.226877",
+    "pcfNcfTTM": "-58.658491",
+    "isST": "0"
+  }
+}

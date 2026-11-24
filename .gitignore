@@ -1,4 +1,10 @@
 # Byte-compiled / optimized / DLL files
+# Project runtime and binaries
+/var/
+/bin/
+/configs/config.local.yaml
+.ruff_cache/
+
 __pycache__/
 *.py[codz]
 *$py.class

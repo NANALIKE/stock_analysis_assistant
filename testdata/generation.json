@@ -1,0 +1,6 @@
+{
+  "mode": "daily",
+  "trade_date": "2026-11-19",
+  "symbols": ["000001.SZ"],
+  "adjustment": "qfq"
+}

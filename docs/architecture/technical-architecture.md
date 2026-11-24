@@ -4,6 +4,7 @@
 |---|---|
 | 状态 | 终版 |
 | 设计日期 | 2026-11-19 |
+| 行情模型修订 | 2026-11-24，详见 `market-data-model.md` |
 | 目标版本 | 技术一期：行情数据最简 MVP |
 | 设计基线 | `product-architecture.md` 终版 |
 | 适用范围 | 本地单用户、A 股、日级数据 |
@@ -33,6 +34,7 @@
 - 一期验收门禁为：交易日 18:00 数据、99.5% 行情完整率、生成任务幂等可恢复、查询只读取活动版本。
 - 用户查询历史日线默认使用前复权 `qfq`；不复权 `none` 仅在调用方显式指定时返回。复权只作用于价格字段，成交额 `amount` 始终保留当日真实成交金额。
 - 前复权不是独立任务，而是行情生成任务的标准化步骤；系统保存不复权价格与复权因子/公司行动，由本地生成可审计的前复权序列。
+- 日行情完整采集 BaoStock 19 个字段，包含四项估值、前收参考价、换手率、涨跌幅、交易/ST 状态；独立保存逐日状态、三个因子和完整分红记录。详细口径以 [一期日行情数据模型](market-data-model.md) 为准。
 
 终版产品架构中的个股问答、统一研究信号、1/5/30 交易日预测和到期评估仍保留，但按后续技术阶段建设，不作为一期完成条件。
 
@@ -307,7 +309,9 @@ flowchart TD
 2. 内置日更在交易日收盘后的配置时间创建 `daily + qfq` 请求；一期验收要求 18:00 前完成，不把具体启动分钟写死在领域代码中。
 3. 进程启动补偿和 `stockctl generate` 使用同一命令接口，用于漏跑恢复、抽样和历史补采。
 
-生成任务先取得不复权日线和复权因子/公司行动，再生成暂存版本中的前复权 OHLC。若某只证券出现新增或修订的除权除息事件，该证券受影响的历史区间必须在新 `dataset_version` 中重算；校验通过后整体发布，禁止直接修改当前活动版本。无公司行动变化时，只处理请求日期范围。任何重算都保持原始快照只追加，并记录算法版本、输入哈希和数据截止时间。
+生成任务先取得不复权日线和完整复权因子/分红集合，再生成暂存版本中的前复权 OHLC。发现新增或修订事件时，重新拉取该股完整历史因子集合，并重算受影响的历史年份；不得只合并当天事件。因子和算法未变化、且新锚点不会改变历史价格时，复用旧历史块。任何重算都保持原始快照只追加，并记录算法版本、完整输入哈希和锚点。
+
+新版本继承父版本完整的股票/年份清单；变化年份复制完整旧块再合并请求范围，连同 none/qfq、估值和逐日状态一起替换。单日生成不会丢失历史，部分股票补采不会丢失其他证券。因子集合绑定见 [日行情模型第 7 节](market-data-model.md#7-逻辑完整版本与增量存储)。
 
 ## 8. 存储设计
 
@@ -328,15 +332,18 @@ SQLite 使用 WAL、`foreign_keys=ON`、`busy_timeout` 和受控连接池。它�
 | 阶段 | 表组 | 关键表/内容 | 核心约束 |
 |---|---|---|---|
 | 一期 | 主数据 | `instruments`、`instrument_aliases`、`trading_days` | 股票身份使用内部 ID；代码可变但身份不变 |
-| 一期 | 来源与版本 | `source_snapshots`、`dataset_versions`、`artifacts` | 原始制品只追加；活动版本唯一；哈希可校验 |
-| 一期 | 行情事实 | `daily_bars`、`corporate_actions`、`data_quality_issues` | 主键包含证券、交易日、复权口径和数据版本；保留 `none` 与 `qfq`；不按股票建表 |
+| 一期 | 来源与版本 | `source_snapshots`、`dataset_versions`、`artifacts`、`dataset_partitions`、`dataset_factor_sets` | 原始制品只追加；活动逻辑版本唯一；清单复用不可变历史块并固定因子集合/算法/锚点 |
+| 一期 | 日级事实 | `daily_bars`、`daily_valuations`、`instrument_daily_status` | none/qfq 共存；估值只存一份；缺口保存独立状态，不填价格 |
+| 一期 | 复权与审计 | `adjustment_factors`、`corporate_actions`、`data_quality_issues` | 三个因子分别保存；分红多时间点/完整值留存；异常可定位 |
 | 一期 | 运行审计 | `generation_jobs`、`job_attempts`、`provider_calls`、`quality_reports` | 生成请求幂等；失败可定位、可重试、可统计耗时/记录数 |
 | 二期 | 公司事实 | `facts`、`fact_sources`、`fact_citations` | 同时记录 `effective_at` 与 `available_at`，回测按后者截断 |
 | 二期 | 模型与预测 | `model_versions`、`feature_runs`、`predictions`、`signals` | 保存输入版本、as-of、目标交易日、模型/特征/代码版本 |
 | 二期 | 评估 | `prediction_outcomes`、`evaluation_runs`、`calibration_bins` | 预测与实际一一关联，禁止覆盖历史结果 |
 | 三期 | 问答 | `qa_sessions`、`qa_messages`、`qa_citations` | 回答引用本地事实 ID；保存模型和提示版本 |
 
-价格建议按固定精度整数存储，收益和模型指标使用浮点并明确单位；`amount` 按人民币成交金额保存且永不乘复权因子，`volume` 保留来源单位并在标准化契约中固定。交易日使用 ISO 日期，所有时间戳使用 UTC，界面按本地时区展示。迁移只能前向执行，发布前用真实副本演练并自动备份。
+OHLC、来源前收参考价与 `amount` 按人民币元乘 10000 的整数存储；`amount` 永不乘复权因子，`volume` 固定为股，比例与估值使用 REAL，因子/分红数值保留十进制文本。可选字段空值保存 NULL，完整原始字符串和新增字段保存在制品中。交易日使用 ISO 日期，所有时间戳使用 UTC，界面按本地时区展示。迁移只能前向执行，升级前备份并用副本验证。迁移 002 保留旧记录并把旧金额从分转为万分之一元；旧公司行动单独归档。
+
+`source_snapshots` 保存接口、请求、返回字段、计数/错误、获取时间、来源明确给出的发布时间和适配器版本。获取/观察时间不能替代真实历史可用时间。表粒度、接口字段及发布门禁详见 [一期日行情数据模型](market-data-model.md)。
 
 一期不启用 SQLite FTS5。三期进入问答后，先使用 FTS5 关键词检索；只有真实评测证明召回不足时，才考虑 embedding。
 
@@ -379,17 +386,17 @@ SQLite 使用 WAL、`foreign_keys=ON`、`busy_timeout` 和受控连接池。它�
 
 - `mode=daily` 必须给出 `trade_date`；`mode=backfill` 改用 `from` 和 `to`。
 - `symbols` 为空表示当日应有数据的全部 A 股；指定代码用于抽样、修复或小范围补采。
-- `adjustment` 省略时默认为 `qfq`；一期支持 `qfq` 和 `none`，不把后复权作为默认或验收依赖。
+- `adjustment` 省略时默认为 `qfq`；一期支持 `qfq` 和 `none`，该参数表达默认口径，新模型发布仍保存两种日线，不把后复权作为默认或验收依赖。
 - 数据源由服务端配置选择，不暴露为 API 参数，避免业务调用方绑定 BaoStock。
 - 同一规范化请求具有相同幂等键。已存在时返回原 `generation_id`，不会重复写行情。
-- API 只接受任务，不同步等待采集；任务状态为 `queued/running/succeeded/failed`，内部数据版本另有 `building/active/rejected` 状态。
+- API 只接受任务，不同步等待采集；任务状态为 `queued/running/succeeded/failed`，内部数据版本另有 `building/active/rejected/superseded` 状态。
 - 一期服务仅监听本机，因此暂不建设用户鉴权；若开放远程访问，生成接口必须先加入认证和权限控制。
 
 任务状态响应至少包含 `generation_id`、`status`、`stage`、`attempt`、请求参数、已处理/应处理记录数、完整率、`dataset_version`、开始/结束时间和结构化错误。失败时 `dataset_version` 不得指向活动版本。
 
 ### 9.2 行情查询返回约束
 
-日线查询必须返回 `instrument`、`dataset_version`、`as_of`、`source`、`adjustment` 和 `bars`。调用方省略 `adjustment` 时默认查询 `qfq`；显式传 `none` 才返回交易所当日真实 OHLC。查询层永远不读取 `building/rejected` 版本；日期无数据时区分停牌、未上市、已退市与真实缺失，不用前值静默填充。
+日线查询必须返回 `instrument`、`dataset_version`、`as_of`、`source`、`adjustment`、`bars` 和 `date_statuses`。调用方省略 `adjustment` 时默认查询 `qfq`；显式传 `none` 才返回交易所当日真实 OHLC。查询从唯一活动逻辑版本的分区清单出发，允许引用其继承的 `superseded` 物理历史块，永远不读取 `building/rejected` 物理版本；日期无数据时通过 `date_statuses` 区分停牌、未上市、已退市与真实缺失，不用前值静默填充。
 
 ```json
 {
@@ -399,12 +406,14 @@ SQLite 使用 WAL、`foreign_keys=ON`、`busy_timeout` 和受控连接池。它�
   "source": "baostock",
   "adjustment": "qfq",
   "bars": [
-    {"trade_date": "2026-11-19", "open": 11.20, "high": 11.45, "low": 11.08, "close": 11.36, "volume": 12345678, "amount": 139876543.21}
-  ]
+    {"trade_date": "2026-11-19", "open": 11.20, "high": 11.45, "low": 11.08, "close": 11.36, "previous_close": null, "volume": 12345678, "amount": 139876543.21, "turnover_rate": null, "change_rate": null, "trade_status": "trading", "is_suspended": false, "is_st": null, "valuation": null}
+  ],
+  "date_statuses": [],
+  "coverage": 0.995
 }
 ```
 
-`qfq` 仅调整 `open/high/low/close` 等价格字段；`amount` 始终是当日真实成交金额，不随复权口径改变。前复权以响应所引用数据版本的 `as_of` 为锚点，最新一日的前复权价格通常与不复权价格相同；后续公司行动可能改变历史前复权值，因此客户端不得脱离 `dataset_version + as_of + adjustment` 缓存或比较价格。
+上述 JSON 仅说明响应结构，不是来源准入样本。`qfq` 仅调整 `open/high/low/close`；`previous_close` 保留不复权交易所前收参考价，`change_rate` 保留来源涨跌幅，估值、换手率、成交量和真实成交额也不复权。比例字段 `0.01` 表示 1%；缺字段返回 null。前复权以逻辑版本的 `as_of` 为锚点，通过因子集合清单固定完整输入与算法；后续公司行动可能改变历史前复权值，因此客户端不得脱离 `dataset_version + as_of + adjustment` 缓存或比较价格。
 
 一期固定错误码：`INVALID_ARGUMENT`、`GENERATION_NOT_FOUND`、`INSTRUMENT_NOT_FOUND`、`NO_ACTIVE_DATASET`、`SOURCE_UNAVAILABLE` 和 `INTERNAL_ERROR`；错误响应携带 `request_id`，但不得回传供应商密钥或原始堆栈。
 

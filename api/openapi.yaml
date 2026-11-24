@@ -1,0 +1,418 @@
+openapi: 3.0.3
+info:
+  title: Stock Analysis Assistant Market Data API
+  version: 0.2.0
+  description: |
+    一期仅包含行情生成和查询。初始化版本持久化生成请求，但采集链路尚未接入，
+    因此任务最终为 failed/SOURCE_UNAVAILABLE，不发布模拟数据。
+    日行情模型包含全部 19 个 BaoStock 日 K 字段；查询按活动逻辑版本清单返回
+    日线、嵌套估值与逐日状态，缺失可选值保持 null。
+servers:
+  - url: http://127.0.0.1:8080/api/v1
+paths:
+  /market-data/generations:
+    post:
+      operationId: createGeneration
+      summary: 创建幂等异步行情生成任务
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerationRequest'
+      responses:
+        '202':
+          description: 返回新任务或同一请求的既有任务
+          headers:
+            Location:
+              schema:
+                type: string
+            X-Request-ID:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generation_id, status, status_url]
+                properties:
+                  generation_id:
+                    type: string
+                  status:
+                    $ref: '#/components/schemas/JobStatus'
+                  status_url:
+                    type: string
+        '400':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+  /market-data/generations/{id}:
+    get:
+      operationId: getGeneration
+      summary: 查询任务阶段、attempt 与质量结果
+      parameters:
+        - $ref: '#/components/parameters/ID'
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Generation'
+        '404':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+  /market-data/status:
+    get:
+      operationId: getMarketDataStatus
+      summary: 查询活动版本与最后任务；空库返回 NO_ACTIVE_DATASET
+      responses:
+        '200':
+          description: 已验证的活动版本状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Dataset'
+                  - type: object
+                    required: [stale, last_job]
+                    properties:
+                      stale:
+                        type: boolean
+                        description: 初始化阶段按上海时区日期判断；交易日新鲜度在日历接入后实现
+                      last_job:
+                        allOf:
+                          - $ref: '#/components/schemas/Generation'
+                        nullable: true
+        '503':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+  /instruments:
+    get:
+      operationId: searchInstruments
+      summary: 按代码、别名或名称搜索证券，最多返回 100 条
+      parameters:
+        - name: query
+          in: query
+          schema:
+            type: string
+            default: ''
+      responses:
+        '200':
+          description: 证券列表，空库返回空数组
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [instruments]
+                properties:
+                  instruments:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Instrument'
+        '500':
+          $ref: '#/components/responses/Error'
+  /instruments/{id}/daily-bars:
+    get:
+      operationId: getDailyBars
+      summary: 查询唯一活动版本的日线
+      parameters:
+        - $ref: '#/components/parameters/ID'
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: adjustment
+          in: query
+          schema:
+            $ref: '#/components/schemas/Adjustment'
+      responses:
+        '200':
+          description: 带数据版本、截止日期和复权口径的行情；amount 不复权
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Dataset'
+                  - type: object
+                    required: [instrument, bars, date_statuses]
+                    properties:
+                      instrument:
+                        $ref: '#/components/schemas/Instrument'
+                      bars:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Bar'
+                      date_statuses:
+                        type: array
+                        description: 来自同一活动版本清单的日期状态；缺失日不填充价格
+                        items:
+                          $ref: '#/components/schemas/DateStatus'
+        '400':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+components:
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Error:
+      description: 结构化错误，携带 request_id，不回传供应商 stderr 或堆栈
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, request_id]
+            properties:
+              error:
+                $ref: '#/components/schemas/ErrorDetail'
+              request_id:
+                type: string
+  schemas:
+    Adjustment:
+      type: string
+      enum: [none, qfq]
+      default: qfq
+    JobStatus:
+      type: string
+      enum: [queued, running, succeeded, failed]
+    GenerationRequest:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      description: |
+        daily 必须提供 trade_date；backfill 必须提供 from/to；两组日期互斥。
+        adjustment 表示默认口径；新模型发布须保留 none 与 qfq 两种日线。
+        在线采集和发布尚未实现。
+      properties:
+        mode:
+          type: string
+          enum: [daily, backfill]
+        trade_date:
+          type: string
+          format: date
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        symbols:
+          type: array
+          default: []
+          description: 空数组表示所有应有 A 股；代码规范化为大写、排序和去重
+          items:
+            type: string
+            pattern: '^[0-9]{6}\.(SH|SZ|BJ|sh|sz|bj)$'
+        adjustment:
+          $ref: '#/components/schemas/Adjustment'
+      oneOf:
+        - required: [trade_date]
+          properties:
+            mode:
+              enum: [daily]
+          not:
+            anyOf:
+              - required: [from]
+              - required: [to]
+        - required: [from, to]
+          properties:
+            mode:
+              enum: [backfill]
+          not:
+            required: [trade_date]
+    ErrorDetail:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [INVALID_ARGUMENT, GENERATION_NOT_FOUND, INSTRUMENT_NOT_FOUND, NO_ACTIVE_DATASET, SOURCE_UNAVAILABLE, INTERNAL_ERROR]
+        message:
+          type: string
+    Generation:
+      type: object
+      required: [generation_id, status, stage, attempt, request, processed_records, expected_records, coverage, dataset_version, created_at, started_at, finished_at, error]
+      properties:
+        generation_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        stage:
+          type: string
+        attempt:
+          type: integer
+          minimum: 0
+        request:
+          $ref: '#/components/schemas/GenerationRequest'
+        processed_records:
+          type: integer
+          format: int64
+        expected_records:
+          type: integer
+          format: int64
+        coverage:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+        dataset_version:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        error:
+          allOf:
+            - $ref: '#/components/schemas/ErrorDetail'
+          nullable: true
+    Instrument:
+      type: object
+      required: [id, symbol, name, exchange, listed_on, delisted_on, status]
+      properties:
+        id:
+          type: string
+        symbol:
+          type: string
+        name:
+          type: string
+        exchange:
+          type: string
+          enum: [SH, SZ, BJ]
+        listed_on:
+          type: string
+          format: date
+        delisted_on:
+          type: string
+          format: date
+          nullable: true
+        status:
+          type: string
+          enum: [listed, delisted]
+    Dataset:
+      type: object
+      required: [dataset_version, as_of, source, adjustment, coverage]
+      properties:
+        dataset_version:
+          type: string
+        as_of:
+          type: string
+          format: date
+        source:
+          type: string
+        adjustment:
+          $ref: '#/components/schemas/Adjustment'
+        coverage:
+          type: number
+          minimum: 0
+          maximum: 1
+    Bar:
+      type: object
+      required: [trade_date, open, high, low, close, previous_close, volume, amount, turnover_rate, change_rate, trade_status, is_st, is_suspended, valuation]
+      properties:
+        trade_date:
+          type: string
+          format: date
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        volume:
+          type: integer
+          format: int64
+          description: 股
+        amount:
+          type: number
+          description: 人民币元，最多四位小数；真实成交金额不随复权改变
+        is_suspended:
+          type: boolean
+        previous_close:
+          type: number
+          nullable: true
+          description: 来源不复权的交易所前收参考价；除权日可能不同于上一日 close，在 qfq 响应中也不复权
+        turnover_rate:
+          type: number
+          nullable: true
+          minimum: 0
+          description: 比例，0.01 表示 1%；来源 turn 百分数除以 100
+        change_rate:
+          type: number
+          nullable: true
+          description: 来源涨跌幅转为比例，在 qfq 响应中保持来源口径
+        trade_status:
+          type: string
+          enum: [trading, suspended]
+        is_st:
+          type: boolean
+          nullable: true
+        valuation:
+          allOf:
+            - $ref: '#/components/schemas/Valuation'
+          nullable: true
+          description: 同日不复权口径的估值；缺记录为 null，缺字段为 null，不随 qfq 改变
+    Valuation:
+      type: object
+      required: [pe_ttm, pb_mrq, ps_ttm, pcf_ncf_ttm]
+      properties:
+        pe_ttm:
+          type: number
+          nullable: true
+        pb_mrq:
+          type: number
+          nullable: true
+        ps_ttm:
+          type: number
+          nullable: true
+        pcf_ncf_ttm:
+          type: number
+          nullable: true
+    DateStatus:
+      type: object
+      required: [trade_date, code_name, trade_status, is_st, reason_code]
+      properties:
+        trade_date:
+          type: string
+          format: date
+        code_name:
+          type: string
+          nullable: true
+        trade_status:
+          type: string
+          enum: [trading, suspended, not_listed, delisted, missing]
+        is_st:
+          type: boolean
+          nullable: true
+        reason_code:
+          type: string
+          nullable: true

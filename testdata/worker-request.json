@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "run_id": "protocol_smoke",
+  "operation": "protocol_check",
+  "provider": "baostock",
+  "as_of": "2026-11-19",
+  "params": {}
+}
