@@ -58,3 +58,17 @@ class DailyModelTests(unittest.TestCase):
         ):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 normalize_daily_record(self.raw | patch)
+
+    def test_real_partial_suspended_row_retains_status_and_valuation(self):
+        fixture = Path(__file__).resolve().parents[2] / "testdata" / "baostock-delisted-online.json"
+        response = json.loads(fixture.read_text())["response"]
+        raw = dict(zip(response["fields"], response["rows"][-1], strict=True))
+        result = normalize_daily_record(raw)
+        self.assertEqual(result["kind"], "daily_status")
+        self.assertEqual(result["trade_date"], "2023-07-07")
+        self.assertEqual(result["trade_status"], "suspended")
+        self.assertNotIn("bar", result)
+        self.assertEqual(result["valuation"]["pe_ttm"], -0.412523)
+        self.assertEqual(result["source_record"], raw)
+        with self.assertRaises(ValueError):
+            normalize_daily_record(raw | {"tradestatus": "1"})

@@ -5,6 +5,7 @@
 | 状态 | 终版 |
 | 设计日期 | 2026-11-19 |
 | 行情模型修订 | 2026-11-24，详见 `market-data-model.md` |
+| 目录能力修订 | 2026-11-25，按当前实现合并模块职责、依赖与本地存储约定 |
 | 目标版本 | 技术一期：行情数据最简 MVP |
 | 设计基线 | `product-architecture.md` 终版 |
 | 适用范围 | 本地单用户、A 股、日级数据 |
@@ -34,7 +35,7 @@
 - 一期验收门禁为：交易日 18:00 数据、99.5% 行情完整率、生成任务幂等可恢复、查询只读取活动版本。
 - 用户查询历史日线默认使用前复权 `qfq`；不复权 `none` 仅在调用方显式指定时返回。复权只作用于价格字段，成交额 `amount` 始终保留当日真实成交金额。
 - 前复权不是独立任务，而是行情生成任务的标准化步骤；系统保存不复权价格与复权因子/公司行动，由本地生成可审计的前复权序列。
-- 日行情完整采集 BaoStock 19 个字段，包含四项估值、前收参考价、换手率、涨跌幅、交易/ST 状态；独立保存逐日状态、三个因子和完整分红记录。详细口径以 [一期日行情数据模型](market-data-model.md) 为准。
+- 日行情完整采集 BaoStock 18 个字段，包含四项估值、前收参考价、换手率、涨跌幅、交易/ST 状态；独立保存逐日状态、三个因子和完整分红记录。详细口径以 [一期日行情数据模型](market-data-model.md) 为准。
 
 终版产品架构中的个股问答、统一研究信号、1/5/30 交易日预测和到期评估仍保留，但按后续技术阶段建设，不作为一期完成条件。
 
@@ -306,10 +307,10 @@ flowchart TD
 前复权没有独立调度器，由以下入口创建同一种行情生成任务：
 
 1. 调用 `POST /api/v1/market-data/generations`，省略 `adjustment` 时按 `qfq` 处理。
-2. 内置日更在交易日收盘后的配置时间创建 `daily + qfq` 请求；一期验收要求 18:00 前完成，不把具体启动分钟写死在领域代码中。
-3. 进程启动补偿和 `stockctl generate` 使用同一命令接口，用于漏跑恢复、抽样和历史补采。
+2. 手工提交 `daily + trade_date + qfq` 请求，日期必须已收盘；2026-11-24 批准的采集计划不含自动日更调度。
+3. `stockctl generate/backfill -retry` 使用同一命令接口，用于失败恢复、抽样和历史补采。重启不会自动重试中断任务。
 
-生成任务先取得不复权日线和完整复权因子/分红集合，再生成暂存版本中的前复权 OHLC。发现新增或修订事件时，重新拉取该股完整历史因子集合，并重算受影响的历史年份；不得只合并当天事件。因子和算法未变化、且新锚点不会改变历史价格时，复用旧历史块。任何重算都保持原始快照只追加，并记录算法版本、完整输入哈希和锚点。
+生成任务先取得不复权日线和完整复权因子/分红集合，再生成暂存版本中的前复权 OHLC。当前每次刷新完整因子并重算各逻辑证券历史 qfq；分红刷新规则见采集说明。跳过未变 qfq 重建的优化留待后续。任何重算都保持原始快照只追加，并记录算法版本、完整输入哈希和锚点。
 
 新版本继承父版本完整的股票/年份清单；变化年份复制完整旧块再合并请求范围，连同 none/qfq、估值和逐日状态一起替换。单日生成不会丢失历史，部分股票补采不会丢失其他证券。因子集合绑定见 [日行情模型第 7 节](market-data-model.md#7-逻辑完整版本与增量存储)。
 
@@ -322,7 +323,7 @@ SQLite 使用 WAL、`foreign_keys=ON`、`busy_timeout` 和受控连接池。它�
 大体积不可变内容不放入数据库 BLOB：
 
 - `var/raw/`：按来源和日期保存压缩原始响应。
-- `var/artifacts/`：一期保留目录但不写模型制品；后续用于特征矩阵、回测输出和模型文件。
+- `var/artifacts/`：一期写质量报告与 qfq 核验明细；后续用于特征矩阵、回测输出和模型文件。
 - SQLite `artifacts` 表：保存相对路径、类型、字节数、SHA-256、创建任务和 schema 版本。
 
 数据库和制品目录是一个备份单元。任何一方缺失都视为备份不完整。
@@ -415,17 +416,24 @@ OHLC、来源前收参考价与 `amount` 按人民币元乘 10000 的整数存�
 
 上述 JSON 仅说明响应结构，不是来源准入样本。`qfq` 仅调整 `open/high/low/close`；`previous_close` 保留不复权交易所前收参考价，`change_rate` 保留来源涨跌幅，估值、换手率、成交量和真实成交额也不复权。比例字段 `0.01` 表示 1%；缺字段返回 null。前复权以逻辑版本的 `as_of` 为锚点，通过因子集合清单固定完整输入与算法；后续公司行动可能改变历史前复权值，因此客户端不得脱离 `dataset_version + as_of + adjustment` 缓存或比较价格。
 
-一期固定错误码：`INVALID_ARGUMENT`、`GENERATION_NOT_FOUND`、`INSTRUMENT_NOT_FOUND`、`NO_ACTIVE_DATASET`、`SOURCE_UNAVAILABLE` 和 `INTERNAL_ERROR`；错误响应携带 `request_id`，但不得回传供应商密钥或原始堆栈。
+一期错误码包括 `INVALID_ARGUMENT`、`GENERATION_NOT_FOUND`、`INSTRUMENT_NOT_FOUND`、
+`NO_ACTIVE_DATASET`、`SOURCE_UNAVAILABLE`、`QUALITY_VALIDATION_FAILED`、
+`ADJUSTMENT_VALIDATION_FAILED`、`PARENT_VERSION_CONFLICT` 和 `INTERNAL_ERROR`；
+错误响应携带 `request_id`，但不得回传供应商密钥或原始堆栈。
 
 `stockctl` 保留 `generate`、`doctor`、`backup` 命令作为本地恢复通道，但不再替代一期生成 API。
 
 ## 10. 项目结构
 
+目录职责与模块依赖属于技术架构：它们把第 5 节的能力边界落实到代码位置，明确业务规则、技术实现与运行数据各自的归属。以下按 2026-11-25 的实际实现记录；后续能力仍以第 5 节的阶段规划为准。
+
+### 10.1 目录布局
+
 ```text
 stock_analysis_assistant/
 ├── cmd/
 │   ├── stockd/                 # 行情生成/查询 HTTP 与任务执行入口
-│   └── stockctl/               # 初始化、补采、检查和备份恢复
+│   └── stockctl/               # 初始化、生成/补采/重试、检查和备份
 ├── internal/
 │   ├── securities/
 │   ├── marketdata/
@@ -446,16 +454,94 @@ stock_analysis_assistant/
 │   │   ├── providers/
 │   │   └── protocol/
 │   ├── tests/
+│   ├── requirements-dev.lock   # 开发与检查工具依赖
 │   └── pyproject.toml
 ├── configs/config.example.yaml
 ├── testdata/                   # 脱敏且固定的数据源契约样本
-├── docs/architecture/
-├── var/                        # 本地数据库、原始数据、制品和备份；不入库
+├── docs/
+│   ├── architecture/           # 产品、技术架构与行情模型
+│   ├── product/                # 能力需求基线与独立需求变更
+│   └── development/            # Worker 协议、采集实现与验收
+├── bin/                        # 本地编译产物；不提交 Git
+├── var/                        # 本地数据库、原始数据、制品和备份；不提交 Git
+├── .trae/documents/            # 开发计划与评审记录
 ├── Makefile
 └── README.md
 ```
 
-以上是一期实际创建的目录。`facts`、`analysis`、`evaluation`、`qa`、`web` 和 LLM/model adapters 在对应阶段开始前不创建空目录。每个 Go 领域模块内部可有 `domain`、`app`、`ports`，但只在职责确实分化时创建；供应商和持久化实现统一放在 `integrations`。
+`bin/`、`var/` 是构建或运行生成的目录。`facts`、`analysis`、`evaluation`、`qa`、`web` 和 LLM/model adapters 在对应阶段开始前不创建空目录。
+
+### 10.2 Go 目录与能力归属
+
+`cmd/` 负责入口和装配，`internal/` 保存 Go 业务模块、适配器和技术底座。
+
+| 目录 | 当前核心能力 | 责任边界 |
+|---|---|---|
+| `cmd/stockd/` | 加载配置、初始化数据库、装配 Worker/存储、启动任务执行器与 HTTP 服务 | 选择并注入具体实现；业务规则交给领域模块 |
+| `cmd/stockctl/` | 初始化、生成、历史补采、失败重试、数据库检查和备份 | 生成/补采/重试调用运行中的 `stockd`；恢复数据库采用文档规定的停服流程 |
+| `internal/delivery/` | 行情生成、任务状态、数据状态、证券搜索和日线查询；参数解析与错误映射 | HTTP 边界；不执行采集或计算完整率/复权 |
+| `internal/securities/` | 证券身份、上市退市边界、交易日与应有数据日期判定 | 提供完整率分母和缺失分类的证券基准 |
+| `internal/jobs/` | 规范化请求、幂等任务、冻结采集上下文、稳定查询哈希、串行执行和显式失败重试 | 编排任务生命周期；日更和补采当前均由 API/CLI 手动触发 |
+| `internal/marketdata/` | 采集/修复流程、本地前复权与精度处理、抽样核对、覆盖率和质量门禁 | 定义行情模型及 `Source`、`BuildStore` 端口；不绑定 SDK 或 SQL |
+| `internal/integrations/worker/` | Go 调用 Python 子进程、超时/输出限制、采集查询及 JSONL 批次校验 | 实现数据源端口；检查协议版本、开始/结束清单、计数和哈希 |
+| `internal/integrations/persistence/` | SQLite 证券/行情/估值/状态/因子/分红存储，任务、检查点和来源审计，股票年度分区继承、质量报告与原子发布 | 实现持久化端口和事务；领域通过端口访问数据 |
+| `internal/platform/` | 通用错误与 ID 等技术原语 | 不包含证券、复权或发布资格等业务判断 |
+| `internal/platform/config/` | YAML 加载、环境变量覆盖与配置校验 | 统一配置入口 |
+| `internal/platform/database/` | SQLite 连接、WAL、外键、有序迁移与在线快照 | 数据库基础设施；业务 SQL 位于持久化适配器 |
+| `internal/platform/artifacts/` | gzip 不可变制品写入/读取、内容寻址、SHA-256 与长度校验 | 文件完整性能力；制品的业务归属由调用方决定 |
+| `internal/platform/observability/` | `slog` JSON 日志输出到标准错误 | 日志技术实现；任务状态与质量报告仍保存到数据库 |
+
+### 10.3 Python 与工程支持目录
+
+| 目录 | 当前核心能力 | 责任边界 |
+|---|---|---|
+| `worker/` | Python 项目配置、运行与开发依赖锁 | Worker 运行环境；运行依赖锁位于 `stock_worker/dependencies.lock` |
+| `worker/stock_worker/` | 命令入口、请求分发、版本/依赖检查和协议输出 | 批处理进程；不直接连接或写入 SQLite |
+| `worker/stock_worker/protocol/` | 请求校验、JSONL 开始/记录/结束输出、记录计数与哈希 | 与供应商无关的进程契约 |
+| `worker/stock_worker/providers/` | BaoStock 串行会话、分页、查询白名单、无损原始响应、日线/逐日状态/参考数据/公司行动转换与原文重放 | 隔离供应商 SDK 和字段口径；本地前复权计算由 Go 领域层完成 |
+| `worker/tests/` | 协议、字段转换、原始响应和会话回归测试 | 固定样本验证；普通测试不依赖在线免费源 |
+| `api/` | OpenAPI 接口与错误码契约 | 对外协议的共同基线 |
+| `configs/` | 可提交的示例配置与本机覆盖配置 | `config.example.yaml` 是模板；`config.local.yaml` 不提交 Git |
+| `migrations/` | 嵌入 Go 二进制的有序 SQL 迁移 | 当前 001 初始化、002 完整日行情模型、003 采集上下文/检查点/审计与声明区间 |
+| `testdata/` | 固定生成请求、契约样本及真实复权事件/退市回归快照 | 小型可复用测试输入；全量运行数据放在 `var/` |
+| `docs/architecture/` | 产品范围、技术边界、数据模型与目录能力设计 | 已确认的设计基线 |
+| `docs/product/` | 按产品能力维护需求基线，按独立交付目标保存需求变更与状态索引 | 业务行为与验收标准；技术口径引用架构/协议文档，目录规则见[产品需求索引](../product/README.md) |
+| `docs/development/` | Worker 协议、采集实现说明与验收证据/未验证范围 | 记录实现和验证情况，不替代产品范围定义 |
+| `.trae/documents/` | 开发计划与评审记录 | 开发过程资料；不参与应用运行 |
+| `bin/` | `stockd`、`stockctl` 本地编译产物 | 可重新构建；不提交 Git |
+| `var/` | SQLite、原始响应、质量/运行制品、备份及隔离在线样本 | 本地运行状态；不提交 Git，布局见 10.5 |
+
+`.git/` 属于版本管理元数据；`.screenshots/`、`.tmp/` 等工作目录用于截图或临时验证，不属于业务模块，也不作为架构依赖。
+
+### 10.4 模块依赖与文件组织
+
+生成链路为 `delivery → jobs → securities/marketdata → 领域端口 → integrations`；查询经 delivery 调用已装配的查询接口，读取活动版本。`cmd/*` 负责装配，适配器依赖领域端口和 `platform`，领域模块不反向依赖具体适配器。Go 管理业务状态与 SQLite 写入；Python 通过 JSONL 返回采集记录和原文，Go 校验后登记、存储并决定是否发布。
+
+当前 Go 领域模块按职责拆文件：
+
+- `schema.go`：数据结构、请求/结果类型与端口定义。
+- `context.go`：任务执行上下文、采集范围与查询上下文。
+- `run.go`：业务流程与公开应用能力。
+- `adjustment.go`、`quality.go` 等：独立复权、校验或业务转换规则。
+
+只在职责确实分化时再创建 `domain/app/ports` 子目录。供应商和持久化实现统一放在 `integrations`，通用技术原语放在 `platform`，避免业务模块内部混入 SDK 和数据库实现。
+
+### 10.5 本地数据布局、配置与 Git 边界
+
+从仓库根目录运行且使用默认配置时，数据根目录为 `<仓库根目录>/var/`：
+
+| 配置键 | 默认路径 | 内容 | 环境变量覆盖 |
+|---|---|---|---|
+| `storage.database` | `var/stock.db` | 标准化数据、版本、任务、检查点与审计；WAL/SHM 文件位于同目录 | `STOCK_DATABASE` |
+| `storage.raw_dir` | `var/raw` | 供应商原始响应，供审计和重放 | `STOCK_RAW_DIR` |
+| `storage.artifacts_dir` | `var/artifacts` | 质量报告等不可变制品 | `STOCK_ARTIFACTS_DIR` |
+| `storage.backup_dir` | `var/backups` | 数据库快照、raw/artifacts 副本与哈希清单 | `STOCK_BACKUP_DIR` |
+
+默认值见 [配置模板](../../configs/config.example.yaml)，加载与环境变量映射见 [配置实现](../../internal/platform/config/config.go)。本机修改可复制为 `configs/config.local.yaml`，通过 `make run CONFIG=configs/config.local.yaml` 选择；环境变量覆盖 YAML 字符串配置。相对路径统一相对于启动命令的工作目录，不相对于配置文件所在目录。
+
+在线验收的 `var/online-*` 是使用独立配置路径生成的隔离样本目录，不是新的业务模块，也不是默认业务库。各目录可以通过配置迁移到仓库外，本地数据位置不写死在业务代码中。
+
+[`.gitignore`](../../.gitignore) 已忽略 `/var/`、`/bin/` 和 `/configs/config.local.yaml`，当前 Git 跟踪清单中没有这些路径的文件，正常 `git add` 不会纳入它们。若把数据路径改到仓库内其他位置，应同步为新路径配置忽略规则。配置模板、迁移和固定测试样本保留在版本管理中；备份与恢复必须同时处理数据库和引用的文件制品。
 
 ## 11. 配置、可观测与运维
 
@@ -463,7 +549,7 @@ stock_analysis_assistant/
 - 普通配置来自 YAML，环境变量覆盖；API Key 不进入 YAML、日志、数据库或 Git。
 - 使用 Go `slog` 输出结构化日志，贯穿 `request_id`、`run_id`、`dataset_version`、`instrument_id`。
 - 生成任务状态、耗时、记录数、重试和完整率写入运行审计表；状态 API 直接读取这些结果。
-- 日更采用内置调度加启动补偿：进程启动时检查最近交易日是否缺任务；同时保留 `stockctl generate` 手工恢复入口。
+- 当前日更由 API/CLI 手动触发，重启恢复 queued 任务并终结 running 任务；自动调度与启动补偿留待后续。
 - 每次迁移和大规模补采前执行 SQLite 在线备份；恢复演练要同时校验 DB 和制品哈希。
 - 保留最近活动版本及可配置数量的历史版本；清理必须先验证没有预测、问答或评估引用。
 

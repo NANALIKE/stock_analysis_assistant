@@ -84,19 +84,22 @@ func (r Request) Key(provider string) string {
 }
 
 type Job struct {
-	ID               string          `json:"generation_id"`
-	Status           string          `json:"status"`
-	Stage            string          `json:"stage"`
-	Attempt          int             `json:"attempt"`
-	Request          Request         `json:"request"`
-	ProcessedRecords int64           `json:"processed_records"`
-	ExpectedRecords  int64           `json:"expected_records"`
-	Coverage         *float64        `json:"coverage"`
-	DatasetVersion   *string         `json:"dataset_version"`
-	CreatedAt        string          `json:"created_at"`
-	StartedAt        *string         `json:"started_at"`
-	FinishedAt       *string         `json:"finished_at"`
-	Error            *platform.Error `json:"error"`
+	ID                string          `json:"generation_id"`
+	Status            string          `json:"status"`
+	Stage             string          `json:"stage"`
+	Attempt           int             `json:"attempt"`
+	Request           Request         `json:"request"`
+	ProcessedRecords  int64           `json:"processed_records"`
+	ExpectedRecords   int64           `json:"expected_records"`
+	CompletedUnits    int64           `json:"completed_units"`
+	TotalUnits        int64           `json:"total_units"`
+	QualityArtifactID *string         `json:"quality_artifact_id"`
+	Coverage          *float64        `json:"coverage"`
+	DatasetVersion    *string         `json:"dataset_version"`
+	CreatedAt         string          `json:"created_at"`
+	StartedAt         *string         `json:"started_at"`
+	FinishedAt        *string         `json:"finished_at"`
+	Error             *platform.Error `json:"error"`
 }
 
 type Repository interface {

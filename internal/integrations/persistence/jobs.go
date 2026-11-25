@@ -13,7 +13,7 @@ import (
 
 type Jobs struct{ DB *sql.DB }
 
-const jobColumns = `id,status,stage,attempt,request_json,processed_records,expected_records,coverage,dataset_version,created_at,started_at,finished_at,error_json`
+const jobColumns = `id,status,stage,attempt,request_json,processed_records,expected_records,coverage,dataset_version,created_at,started_at,finished_at,error_json,completed_units,total_units,quality_artifact_id`
 
 type scanner interface{ Scan(...any) error }
 
@@ -22,7 +22,8 @@ func scanJob(row scanner) (jobs.Job, error) {
 	var request string
 	var errorJSON *string
 	if err := row.Scan(&job.ID, &job.Status, &job.Stage, &job.Attempt, &request, &job.ProcessedRecords, &job.ExpectedRecords,
-		&job.Coverage, &job.DatasetVersion, &job.CreatedAt, &job.StartedAt, &job.FinishedAt, &errorJSON); err != nil {
+		&job.Coverage, &job.DatasetVersion, &job.CreatedAt, &job.StartedAt, &job.FinishedAt, &errorJSON,
+		&job.CompletedUnits, &job.TotalUnits, &job.QualityArtifactID); err != nil {
 		return job, err
 	}
 	if err := json.Unmarshal([]byte(request), &job.Request); err != nil {
@@ -34,6 +35,30 @@ func scanJob(row scanner) (jobs.Job, error) {
 		}
 	}
 	return job, nil
+}
+
+func (r Jobs) Retry(ctx context.Context, id string) (jobs.Job, error) {
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	defer tx.Rollback()
+	// Known failed adjustment inputs must be refreshed, not replayed unchanged.
+	if _, err := tx.ExecContext(ctx, `UPDATE generation_units SET state='pending',snapshot_id=NULL
+		WHERE job_id=? AND operation IN ('adjust_factor','history')
+		AND EXISTS(SELECT 1 FROM generation_jobs WHERE id=? AND status='failed'
+		AND error_json LIKE '%ADJUSTMENT_VALIDATION_FAILED%')`, id, id); err != nil {
+		return jobs.Job{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE generation_jobs SET status='queued',stage='queued',
+		error_json=NULL,finished_at=NULL,started_at=NULL
+		WHERE id=? AND status='failed'`, id); err != nil {
+		return jobs.Job{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return jobs.Job{}, err
+	}
+	return r.Get(ctx, id)
 }
 
 func (r Jobs) Create(ctx context.Context, request jobs.Request, provider string) (jobs.Job, error) {
@@ -103,6 +128,10 @@ func (r Jobs) Fail(ctx context.Context, job jobs.Job, failure *platform.Error) e
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE dataset_versions SET state='rejected'
+		WHERE state='building' AND id=(SELECT dataset_version FROM generation_jobs WHERE id=?)`, job.ID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE generation_jobs SET status='failed',stage='failed',error_json=?,finished_at=? WHERE id=? AND status='running'`,
 		string(body), now, job.ID); err != nil {
 		return err

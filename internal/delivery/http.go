@@ -66,6 +66,11 @@ func (api API) fail(w http.ResponseWriter, err error) {
 }
 
 func (api API) generate(w http.ResponseWriter, r *http.Request) {
+	retry := r.URL.Query().Get("retry")
+	if retry != "" && retry != "true" && retry != "false" {
+		api.fail(w, &platform.Error{Code: "INVALID_ARGUMENT", Message: "retry must be true or false"})
+		return
+	}
 	var request jobs.Request
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
@@ -81,6 +86,18 @@ func (api API) generate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.fail(w, err)
 		return
+	}
+	if retry == "true" && job.Status == "failed" {
+		repository, ok := api.Jobs.(jobs.Retrier)
+		if !ok {
+			api.fail(w, &platform.Error{Code: "INTERNAL_ERROR", Message: "retry is unavailable"})
+			return
+		}
+		job, err = repository.Retry(r.Context(), job.ID)
+		if err != nil {
+			api.fail(w, err)
+			return
+		}
 	}
 	url := "/api/v1/market-data/generations/" + job.ID
 	w.Header().Set("Location", url)
@@ -107,16 +124,11 @@ func (api API) status(w http.ResponseWriter, r *http.Request) {
 		api.fail(w, err)
 		return
 	}
-	location, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil {
-		api.fail(w, err)
-		return
-	}
 	respond(w, http.StatusOK, struct {
 		marketdata.Dataset
 		Stale   bool      `json:"stale"`
 		LastJob *jobs.Job `json:"last_job"`
-	}{dataset, dataset.AsOf < time.Now().In(location).Format(time.DateOnly), last})
+	}{dataset, dataset.Stale, last})
 }
 
 func (api API) instruments(w http.ResponseWriter, r *http.Request) {

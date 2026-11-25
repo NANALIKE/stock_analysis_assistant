@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: Stock Analysis Assistant Market Data API
-  version: 0.2.0
+  version: 0.3.0
   description: |
-    一期仅包含行情生成和查询。初始化版本持久化生成请求，但采集链路尚未接入，
-    因此任务最终为 failed/SOURCE_UNAVAILABLE，不发布模拟数据。
-    日行情模型包含全部 19 个 BaoStock 日 K 字段；查询按活动逻辑版本清单返回
+    支持 BaoStock 沪深 A 股历史补采与手工 daily，包含历史退市股；北交所为来源缺口。
+    任务按有限批次采集、保存不可变原文、核验本地 qfq 后原子发布，失败保留旧 active。
+    日行情模型包含全部 18 个 BaoStock 日 K 字段；查询按活动逻辑版本清单返回
     日线、嵌套估值与逐日状态，缺失可选值保持 null。
 servers:
   - url: http://127.0.0.1:8080/api/v1
@@ -14,6 +14,13 @@ paths:
     post:
       operationId: createGeneration
       summary: 创建幂等异步行情生成任务
+      parameters:
+        - name: retry
+          in: query
+          description: true 显式续采同一 failed 任务；body 和幂等键不变
+          schema:
+            type: boolean
+            default: false
       requestBody:
         required: true
         content:
@@ -80,7 +87,7 @@ paths:
                     properties:
                       stale:
                         type: boolean
-                        description: 初始化阶段按上海时区日期判断；交易日新鲜度在日历接入后实现
+                        description: 使用上海时间已收盘交易日与来源日历判断；缺少当日日历时视为 stale
                       last_job:
                         allOf:
                           - $ref: '#/components/schemas/Generation'
@@ -145,10 +152,15 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/Dataset'
                   - type: object
-                    required: [instrument, bars, date_statuses]
+                    required: [instrument, bars, date_statuses, coverage_ranges]
                     properties:
                       instrument:
                         $ref: '#/components/schemas/Instrument'
+                      coverage_ranges:
+                        type: array
+                        description: 当前证券声明的覆盖区间；区间间隙不表示已采集
+                        items:
+                          $ref: '#/components/schemas/CoverageRange'
                       bars:
                         type: array
                         items:
@@ -202,7 +214,9 @@ components:
       description: |
         daily 必须提供 trade_date；backfill 必须提供 from/to；两组日期互斥。
         adjustment 表示默认口径；新模型发布须保留 none 与 qfq 两种日线。
-        在线采集和发布尚未实现。
+        截止日期在异步执行中校验，不晚于最近已收盘交易日。
+        全市场指 BaoStock 的沪深 A 股；指定 BJ 任务以 INVALID_ARGUMENT 失败。
+        部分证券请求不可把未刷新因子的其他证券推进到新全局 as_of。
       properties:
         mode:
           type: string
@@ -246,7 +260,7 @@ components:
       properties:
         code:
           type: string
-          enum: [INVALID_ARGUMENT, GENERATION_NOT_FOUND, INSTRUMENT_NOT_FOUND, NO_ACTIVE_DATASET, SOURCE_UNAVAILABLE, INTERNAL_ERROR]
+          enum: [INVALID_ARGUMENT, GENERATION_NOT_FOUND, INSTRUMENT_NOT_FOUND, NO_ACTIVE_DATASET, SOURCE_UNAVAILABLE, INTERNAL_ERROR, QUALITY_VALIDATION_FAILED, ADJUSTMENT_VALIDATION_FAILED, PARENT_VERSION_CONFLICT]
         message:
           type: string
     Generation:
@@ -270,6 +284,15 @@ components:
         expected_records:
           type: integer
           format: int64
+        completed_units:
+          type: integer
+          format: int64
+        total_units:
+          type: integer
+          format: int64
+        quality_artifact_id:
+          type: string
+          nullable: true
         coverage:
           type: number
           nullable: true
@@ -333,6 +356,42 @@ components:
           type: number
           minimum: 0
           maximum: 1
+        market_scope:
+          type: string
+        selection_scope:
+          type: string
+          enum: [all, selected]
+        from:
+          type: string
+          format: date
+          description: 全部声明区间的最早日期，须结合 ranges_uniform 理解
+        to:
+          type: string
+          format: date
+        universe_size:
+          type: integer
+          format: int64
+        ranges_uniform:
+          type: boolean
+        expected_records:
+          type: integer
+          format: int64
+        covered_records:
+          type: integer
+          format: int64
+        quality_artifact_id:
+          type: string
+          nullable: true
+    CoverageRange:
+      type: object
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
     Bar:
       type: object
       required: [trade_date, open, high, low, close, previous_close, volume, amount, turnover_rate, change_rate, trade_status, is_st, is_suspended, valuation]

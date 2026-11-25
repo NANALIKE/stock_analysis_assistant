@@ -1,8 +1,10 @@
-"""BaoStock daily field contract and lossless normalization; no online collection."""
+"""BaoStock daily field contract and lossless normalization."""
 
 from datetime import date
 from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
+
+from .reference_model import symbol
 
 DAILY_FIELDS = (
     "date",
@@ -74,7 +76,7 @@ def normalize_daily_record(raw: dict[str, str]) -> dict[str, Any]:
     """Keep every source field, including unknown fields, beside typed records.
 
     OHLC/amount are 1/10000 CNY integers. Rates are fractions. Missing optional
-    numeric values are None, never zero. The caller filters the A-share universe.
+    numeric values are None, never zero. Identity must match a recognized A-share code.
     """
     if any(field not in raw for field in DAILY_FIELDS):
         raise ValueError("incomplete daily field envelope")
@@ -87,10 +89,33 @@ def normalize_daily_record(raw: dict[str, str]) -> dict[str, Any]:
     exchange, separator, code = raw["code"].partition(".")
     if separator != "." or exchange not in ("sh", "sz") or len(code) != 6 or not code.isdigit():
         raise ValueError("unsupported BaoStock code")
+    identity = symbol(raw["code"])
     if raw["adjustflag"] != "3":
         raise ValueError("base daily records must be unadjusted")
     if raw["tradestatus"] not in ("0", "1") or raw["isST"] not in ("", "0", "1"):
         raise ValueError("invalid daily status")
+    valuation = {
+        "pe_ttm": _ratio(raw["peTTM"]),
+        "pb_mrq": _ratio(raw["pbMRQ"]),
+        "ps_ttm": _ratio(raw["psTTM"]),
+        "pcf_ncf_ttm": _ratio(raw["pcfNcfTTM"]),
+    }
+    required = ("open", "high", "low", "close", "volume", "amount")
+    if raw["tradestatus"] == "0" and any(raw[field] == "" for field in required):
+        # A source-confirmed suspended placeholder supplies status, not a bar.
+        # Nonempty mandatory values must still satisfy the numeric contract.
+        for field in required:
+            if raw[field]:
+                _scaled(raw[field], 1 if field == "volume" else 10000)
+        return {
+            "kind": "daily_status",
+            "symbol": identity,
+            "trade_date": trade_date,
+            "trade_status": "suspended",
+            "is_st": None if raw["isST"] == "" else raw["isST"] == "1",
+            "valuation": valuation,
+            "source_record": dict(raw),
+        }
     bar = {
         "trade_date": trade_date,
         "adjustment": "none",
@@ -115,14 +140,11 @@ def normalize_daily_record(raw: dict[str, str]) -> dict[str, Any]:
         raise ValueError("invalid OHLC ordering")
     if bar["turnover_rate"] is not None and bar["turnover_rate"] < 0:
         raise ValueError("negative turnover")
+    if bar["trade_status"] == "trading" and bar["low"] == 0:
+        raise ValueError("trading price must be positive")
     return {
-        "symbol": f"{code}.{exchange.upper()}",
+        "symbol": identity,
         "bar": bar,
-        "valuation": {
-            "pe_ttm": _ratio(raw["peTTM"]),
-            "pb_mrq": _ratio(raw["pbMRQ"]),
-            "ps_ttm": _ratio(raw["psTTM"]),
-            "pcf_ncf_ttm": _ratio(raw["pcfNcfTTM"]),
-        },
+        "valuation": valuation,
         "source_record": dict(raw),
     }

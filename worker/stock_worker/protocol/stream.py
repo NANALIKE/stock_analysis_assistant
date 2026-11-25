@@ -32,7 +32,7 @@ def write_batch(
                 "run_id": request.run_id,
                 "worker_version": __version__,
                 "dependency_lock_sha256": lock_sha256,
-                "adapter_version": "baostock-unadmitted-v0",
+                "adapter_version": "baostock-0.9.4-v1",
             }
         ).decode("utf-8")
     )

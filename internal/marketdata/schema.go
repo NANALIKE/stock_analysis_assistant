@@ -7,11 +7,21 @@ import (
 )
 
 type Dataset struct {
-	ID         string  `json:"dataset_version"`
-	AsOf       string  `json:"as_of"`
-	Source     string  `json:"source"`
-	Adjustment string  `json:"adjustment"`
-	Coverage   float64 `json:"coverage"`
+	ID                string  `json:"dataset_version"`
+	AsOf              string  `json:"as_of"`
+	Source            string  `json:"source"`
+	Adjustment        string  `json:"adjustment"`
+	Coverage          float64 `json:"coverage"`
+	Stale             bool    `json:"-"`
+	MarketScope       string  `json:"market_scope"`
+	SelectionScope    string  `json:"selection_scope"`
+	From              string  `json:"from"`
+	To                string  `json:"to"`
+	UniverseSize      int64   `json:"universe_size"`
+	RangesUniform     bool    `json:"ranges_uniform"`
+	ExpectedRecords   int64   `json:"expected_records"`
+	CoveredRecords    int64   `json:"covered_records"`
+	QualityArtifactID *string `json:"quality_artifact_id"`
 }
 
 type Bar struct {
@@ -49,8 +59,9 @@ type DateStatus struct {
 type DailyBars struct {
 	Instrument securities.Instrument `json:"instrument"`
 	Dataset
-	Bars         []Bar        `json:"bars"`
-	DateStatuses []DateStatus `json:"date_statuses"`
+	Bars           []Bar        `json:"bars"`
+	DateStatuses   []DateStatus `json:"date_statuses"`
+	CoverageRanges []Range      `json:"coverage_ranges"`
 }
 
 type Repository interface {

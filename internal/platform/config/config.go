@@ -26,8 +26,10 @@ type Config struct {
 		MaxOutputBytes int64         `yaml:"max_output_bytes"`
 	} `yaml:"worker"`
 	MarketData struct {
-		Provider        string  `yaml:"provider"`
-		MinimumCoverage float64 `yaml:"minimum_coverage"`
+		Provider         string        `yaml:"provider"`
+		MinimumCoverage  float64       `yaml:"minimum_coverage"`
+		RequestInterval  time.Duration `yaml:"request_interval"`
+		MaxQueryAttempts int           `yaml:"max_query_attempts"`
 	} `yaml:"market_data"`
 }
 
@@ -40,6 +42,8 @@ func Load(path string) (Config, error) {
 	defer file.Close()
 	decoder := yaml.NewDecoder(file)
 	decoder.KnownFields(true)
+	c.MarketData.RequestInterval = 200 * time.Millisecond
+	c.MarketData.MaxQueryAttempts = 3
 	if err := decoder.Decode(&c); err != nil {
 		return c, err
 	}
@@ -66,6 +70,9 @@ func Load(path string) (Config, error) {
 	}
 	if c.MarketData.Provider != "baostock" || c.MarketData.MinimumCoverage < 0.995 || c.MarketData.MinimumCoverage > 1 {
 		return c, fmt.Errorf("market_data requires baostock and minimum_coverage in [0.995, 1]")
+	}
+	if c.MarketData.RequestInterval < 0 || c.MarketData.MaxQueryAttempts < 1 || c.MarketData.MaxQueryAttempts > 3 {
+		return c, fmt.Errorf("market_data request_interval must be nonnegative and max_query_attempts in [1,3]")
 	}
 	return c, nil
 }

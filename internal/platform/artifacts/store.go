@@ -1,9 +1,11 @@
 package artifacts
 
 import (
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +15,27 @@ type Metadata struct {
 	Path      string `json:"path"`
 	SizeBytes int64  `json:"size_bytes"`
 	SHA256    string `json:"sha256"`
+}
+
+// Read verifies the immutable compressed bytes before decompressing for replay.
+func (s Store) Read(metadata Metadata) ([]byte, error) {
+	if filepath.Base(metadata.Path) != metadata.Path {
+		return nil, fmt.Errorf("invalid artifact path")
+	}
+	body, err := os.ReadFile(filepath.Join(s.Root, metadata.Path))
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(body)
+	if int64(len(body)) != metadata.SizeBytes || hex.EncodeToString(sum[:]) != metadata.SHA256 {
+		return nil, fmt.Errorf("artifact hash/size mismatch")
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
 }
 
 type Store struct{ Root string }

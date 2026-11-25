@@ -13,3 +13,5 @@ worker:
 market_data:
   provider: baostock
   minimum_coverage: 0.995
+  request_interval: 200ms
+  max_query_attempts: 3

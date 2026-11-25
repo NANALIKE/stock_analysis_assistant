@@ -50,6 +50,9 @@ func (c Client) Execute(ctx context.Context, request Request) (Batch, error) {
 	command.Stdout, command.Stderr = stdout, stderr
 	if err := command.Run(); err != nil {
 		// Supplier stderr is deliberately kept out of API-facing errors.
+		if ctx.Err() != nil {
+			return Batch{}, fmt.Errorf("worker failed: %w", ctx.Err())
+		}
 		return Batch{}, fmt.Errorf("worker failed: %w", err)
 	}
 	return Decode(bytes.NewReader(stdout.buffer.Bytes()), request.RunID, c.MaxOutputBytes)

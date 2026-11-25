@@ -3,7 +3,9 @@ package persistence
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"time"
 
 	"stock_analysis_assistant/internal/marketdata"
 	"stock_analysis_assistant/internal/platform"
@@ -17,14 +19,57 @@ type MarketData struct {
 
 func (r MarketData) Active(ctx context.Context) (marketdata.Dataset, error) {
 	var dataset marketdata.Dataset
-	err := r.DB.QueryRowContext(ctx, `SELECT d.id,d.as_of,d.source,d.default_adjustment,q.coverage
+	var reportJSON string
+	err := r.DB.QueryRowContext(ctx, `SELECT d.id,d.as_of,d.source,d.default_adjustment,q.coverage,d.market_scope,d.selection_scope,q.expected_records,q.report_json
 		FROM dataset_versions d JOIN quality_reports q ON q.dataset_version=d.id
 		WHERE d.state='active' AND q.passed=1`).
-		Scan(&dataset.ID, &dataset.AsOf, &dataset.Source, &dataset.Adjustment, &dataset.Coverage)
+		Scan(&dataset.ID, &dataset.AsOf, &dataset.Source, &dataset.Adjustment, &dataset.Coverage, &dataset.MarketScope, &dataset.SelectionScope, &dataset.ExpectedRecords, &reportJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dataset, &platform.Error{Code: "NO_ACTIVE_DATASET", Message: "no validated dataset has been published"}
 	}
-	return dataset, err
+	if err != nil {
+		return dataset, err
+	}
+	var report marketdata.QualityReport
+	if err = json.Unmarshal([]byte(reportJSON), &report); err != nil {
+		return dataset, err
+	}
+	dataset.CoveredRecords = report.Covered
+	if err = r.DB.QueryRowContext(ctx, `SELECT COALESCE(MIN(from_date),''),COALESCE(MAX(to_date),''),COUNT(DISTINCT instrument_id) FROM dataset_instrument_ranges WHERE dataset_version=?`, dataset.ID).Scan(&dataset.From, &dataset.To, &dataset.UniverseSize); err != nil {
+		return dataset, err
+	}
+	var patterns int
+	if err = r.DB.QueryRowContext(ctx, `SELECT COUNT(DISTINCT pattern) FROM (
+		SELECT instrument_id,group_concat(from_date||':'||to_date,';') pattern FROM
+		(SELECT instrument_id,from_date,to_date FROM dataset_instrument_ranges WHERE dataset_version=? ORDER BY instrument_id,from_date) GROUP BY instrument_id)`, dataset.ID).Scan(&patterns); err != nil {
+		return dataset, err
+	}
+	dataset.RangesUniform = patterns == 1
+	if err = r.DB.QueryRowContext(ctx, `SELECT quality_artifact_id FROM generation_jobs WHERE dataset_version=?`, dataset.ID).Scan(&dataset.QualityArtifactID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return dataset, err
+	}
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return dataset, err
+	}
+	now := time.Now().In(location)
+	closed := now.Format(time.DateOnly)
+	if now.Hour() < 15 {
+		closed = now.AddDate(0, 0, -1).Format(time.DateOnly)
+	}
+	var latest *string
+	if err = r.DB.QueryRowContext(ctx, `SELECT MAX(trade_date) FROM trading_days WHERE exchange='SH' AND is_open=1 AND trade_date<=?`, closed).Scan(&latest); err != nil {
+		return dataset, err
+	}
+	dataset.Stale = latest == nil || dataset.AsOf < *latest
+	var calendarToday int
+	if err = r.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM trading_days WHERE exchange='SH' AND trade_date=?`, now.Format(time.DateOnly)).Scan(&calendarToday); err != nil {
+		return dataset, err
+	}
+	if calendarToday == 0 {
+		dataset.Stale = true
+	}
+	return dataset, nil
 }
 
 func (r MarketData) Bars(ctx context.Context, id, from, to, adjustment string) (marketdata.DailyBars, error) {
@@ -101,5 +146,23 @@ func (r MarketData) Bars(ctx context.Context, id, from, to, adjustment string) (
 		}
 		result.DateStatuses = append(result.DateStatuses, status)
 	}
-	return result, statusRows.Err()
+	err = statusRows.Err()
+	statusRows.Close()
+	if err != nil {
+		return result, err
+	}
+	result.CoverageRanges = []marketdata.Range{}
+	rangeRows, err := r.DB.QueryContext(ctx, `SELECT from_date,to_date FROM dataset_instrument_ranges WHERE dataset_version=? AND instrument_id=? ORDER BY from_date`, dataset.ID, id)
+	if err != nil {
+		return result, err
+	}
+	defer rangeRows.Close()
+	for rangeRows.Next() {
+		var v marketdata.Range
+		if err = rangeRows.Scan(&v.From, &v.To); err != nil {
+			return result, err
+		}
+		result.CoverageRanges = append(result.CoverageRanges, v)
+	}
+	return result, rangeRows.Err()
 }

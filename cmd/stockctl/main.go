@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"stock_analysis_assistant/internal/integrations/persistence"
+	"stock_analysis_assistant/internal/jobs"
 	"stock_analysis_assistant/internal/platform"
 	"stock_analysis_assistant/internal/platform/config"
 	"stock_analysis_assistant/internal/platform/database"
@@ -30,12 +32,16 @@ func main() {
 
 func run() error {
 	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: stockctl <init|generate|doctor|backup> [flags]")
+		return fmt.Errorf("usage: stockctl <init|generate|backfill|doctor|backup> [flags]")
 	}
 	command := os.Args[1]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	configPath := flags.String("config", "configs/config.example.yaml", "YAML configuration")
 	requestPath := flags.String("request", "", "generation request JSON file (generate)")
+	retry := flags.Bool("retry", false, "resume a failed generation")
+	from := flags.String("from", "2000-01-01", "backfill start date")
+	to := flags.String("to", "", "explicit backfill cutoff")
+	symbols := flags.String("symbols", "", "comma-separated A-share symbols; empty selects all")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		return err
 	}
@@ -45,16 +51,32 @@ func run() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if command == "generate" {
-		if *requestPath == "" {
+	if command == "generate" || command == "backfill" {
+		if command == "generate" && *requestPath == "" {
 			return fmt.Errorf("generate requires -request <file.json>")
 		}
-		body, err := os.ReadFile(*requestPath)
+		var body []byte
+		if command == "backfill" {
+			request := jobs.Request{Mode: "backfill", From: *from, To: *to, Adjustment: "qfq", Symbols: []string{}}
+			if *symbols != "" {
+				request.Symbols = strings.Split(*symbols, ",")
+			}
+			if err = request.Normalize(); err != nil {
+				return err
+			}
+			body, err = json.Marshal(request)
+		} else {
+			body, err = os.ReadFile(*requestPath)
+		}
 		if err != nil {
 			return err
 		}
 		// Go remains the writer: the CLI submits to stockd's command endpoint.
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+c.Server.Address+"/api/v1/market-data/generations", bytes.NewReader(body))
+		url := "http://" + c.Server.Address + "/api/v1/market-data/generations"
+		if *retry {
+			url += "?retry=true"
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}

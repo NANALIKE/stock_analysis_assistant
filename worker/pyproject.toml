@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stock-data-worker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Versioned batch data protocol for Stock Analysis Assistant"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["baostock==0.9.4", "pandas==2.2.3"]
 
 [project.scripts]
 stock-worker = "stock_worker.__main__:main"
